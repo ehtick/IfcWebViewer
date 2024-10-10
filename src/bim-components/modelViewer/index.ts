@@ -3,7 +3,7 @@ import * as OBF from "@thatopen/components-front"
 import * as THREE from 'three'
 import { setUpTreeFromProperties } from "../../utilities/BuildingElementUtilities";
 import { GetFragmentsFromExpressIds } from "../../utilities/IfcUtilities";
-import { BuildingElement, knownProperties, SelectionGroup, VisibilityMode, VisibilityState } from "../../utilities/types";
+import { BuildingElement, IfcElement, KnowGroupType as KnowNodeType, knownProperties, SelectionGroup, VisibilityMode, VisibilityState } from "../../utilities/types";
 import { Tree, TreeNode } from "../../utilities/Tree";
 import { _roots } from "@react-three/fiber";
 import { ModelCache } from "../modelCache";
@@ -20,7 +20,8 @@ export class ModelViewManager extends OBC.Component {
     private _enabled = false;
     private _isSetup = false;
     static uuid = "0f5e514e-5c1c-4097-a9cc-6620c2e28378" as const;
-    static defaultyTreeName = "AssemblyTree";
+    static assemblyTreeName = "AssemblyTree";
+    static stationTreeName = "StationTree";
 
     /**
      * Tree is a data structure we create similar to the file strucutre of an .ifc file though typicially we use element properties for robustness to determine groupings such as building steps and assembly
@@ -32,7 +33,7 @@ export class ModelViewManager extends OBC.Component {
 
     private _trees: Map<string, TreeContainer> = new Map();
 
-    getViewTree(name: string): TreeContainer | undefined {
+    getTree(name: string): TreeContainer | undefined {
         if (!name) return;
         return this._trees.get(name);
     }
@@ -44,7 +45,7 @@ export class ModelViewManager extends OBC.Component {
      * @returns 
      */
     getVisibilityMap(treeID: string) {
-        const tree = this.getViewTree(treeID);
+        const tree = this.getTree(treeID);
         if (tree) return tree.visibilityMap;
     }
 
@@ -121,32 +122,30 @@ export class ModelViewManager extends OBC.Component {
         return this._selectedGroup;
     }
 
-    /**
-     * It is assumed that the selected group has an ID that matches the currently active tree. If this group comes from a tree you ar 
-     * not sure is the active tree, first set that tree then select group.
-     */
-    // set SelectedGroup(selectionGroup: SelectionGroup | undefined) {
-    //     if (!selectionGroup) return;
-    //     this._selectedGroup = selectionGroup;
-    //     console.log("ModelViewManager: selected group changed:", selectionGroup.id)
-    //     this.onSelectedGroupChanged.trigger(this._selectedGroup)
-
-
 
     // // Add any additional logic needed when setting the selection group
     // }
     /**
          * It is assumed that the selected group has an ID that matches the currently active tree. If this group comes from a tree you ar 
-         * not sure is the active tree, first set that tree then select group.
+         * not sure is the active tree, first set that tree then select group. If setTree is true then set main tree to inut tree ID if found
          */
-    setSelectionGroup(selectionGroup: SelectionGroup | undefined, updateModelVisibility: boolean) {
+    setSelectionGroup(selectionGroup: SelectionGroup | undefined, updateModelVisibility: boolean, treeID: string, setTree: boolean) {
         if (!selectionGroup) return;
         this._selectedGroup = selectionGroup;
-        console.log("ModelViewManager: selected group changed:", selectionGroup.id)
-        this.onSelectedGroupChanged.trigger(this._selectedGroup)
-        if (updateModelVisibility && this.Tree?.id) {
-            this.updateBasedOnVisibilityMode(undefined, undefined, this.Tree?.id);
+        console.log("ModelViewManager: selected group changed:", selectionGroup.id, updateModelVisibility, treeID ?? this.Tree?.id)
+
+        if (updateModelVisibility) {
+            this.updateBasedOnVisibilityMode(undefined, undefined, treeID ?? this.Tree?.id);
         }
+
+        if(setTree && this._tree?.id !== treeID) {
+            this.setTree(treeID);
+            console.log("ModelViewManager: selection group forced tree change:", treeID)
+
+        }
+        console.log("ModelViewManager: updated:", updateModelVisibility)
+
+        this.onSelectedGroupChanged.trigger(this._selectedGroup)
     }
 
     /**
@@ -168,6 +167,9 @@ export class ModelViewManager extends OBC.Component {
         }
     }
 
+    /**
+     * Get the currently active tree
+     */
     get Tree(): Tree<BuildingElement> | undefined {
         return this._tree?.tree;
     }
@@ -199,30 +201,53 @@ export class ModelViewManager extends OBC.Component {
 
 
 
-    private _defaultTreeStructure = [knownProperties.Assembly, knownProperties.BuildingStep]
+    private _stationTreeStructure = [knownProperties.Station, knownProperties.BuildingStep]
+    private _AssemblyTreeStructure = [knownProperties.Assembly, knownProperties.BuildingStep]
 
-    set defaultTreeStructure(propertyOrder: knownProperties[]) {
-        this._defaultTreeStructure = propertyOrder;
+    set stationTreeStructure(propertyOrder: knownProperties[]) {
+        this._stationTreeStructure = propertyOrder;
     }
 
 
     /**
      * Sets up Tree strucutre based on building elements properties and ignores the ifc file structure
      */
-    setUpDefaultTree = (buildingElements: BuildingElement[] | undefined): void => {
+    setUpDefaultTrees = async (buildingElements: BuildingElement[] | undefined): Promise<void> => {
         if (!buildingElements) {
             this.onTreeChanged.trigger(undefined);
             return;
         }
 
-        const tree = setUpTreeFromProperties(ModelViewManager.defaultyTreeName, buildingElements, this._defaultTreeStructure);
 
-        console.log("tree created:", this._defaultTreeStructure, tree)
-        this.addOrReplaceTree(tree.id, tree)
-        this.setTree(tree.id)
-        this._selectedGroup = undefined;
-        this._enabled = true;
-        // this.updateVisibility(tree.id); // this is slow and the model should already be visible as this is used on opening by default
+        try {
+            // Await the async tree creation functions
+            const [stationTree, assemblyTree] = await Promise.all([
+                setUpTreeFromProperties(ModelViewManager.stationTreeName, buildingElements, this._stationTreeStructure),
+                setUpTreeFromProperties(ModelViewManager.assemblyTreeName, buildingElements, this._AssemblyTreeStructure)
+            ]);
+
+            // Continue the operations after trees are created
+            console.log("Tree created:", this._stationTreeStructure, stationTree);
+            console.log("Tree created:", this._AssemblyTreeStructure, assemblyTree);
+
+            // Add or replace the created trees
+            this.addOrReplaceTree(stationTree.id, stationTree);
+            this.addOrReplaceTree(assemblyTree.id, assemblyTree);
+
+            // Set the active tree
+            this.setTree(stationTree.id);
+
+            // Reset selected group and enable status
+            this._selectedGroup = undefined;
+            this._enabled = true;
+
+            // Optional: If visibility update is necessary, you can re-enable it here.
+            // this.updateVisibility(tree.id); 
+
+        } catch (error) {
+            console.error("Error creating trees:", error);
+            // Handle errors appropriately, maybe trigger an error event or log the issue
+        }
     }
 
     /**
@@ -341,29 +366,35 @@ export class ModelViewManager extends OBC.Component {
 
 
     /**
-     * sets the view of the 3d elements based on the input viewmode and selection group. Note it clears the existing view tree
+     * sets the view of the 3d elements based on the input viewmode and selection group by making a new view tree. Note it clears the existing view tree
      * @param group group to be selected, if undefined will use the selection group of the View Manager if found
      * @param visibilityMode mode to be used, if undefined will use the visibilityMode of the View Manager if found
      * @returns 
      */
     updateBasedOnVisibilityMode(group: SelectionGroup | undefined, visibilityMode: VisibilityMode | undefined, treeID: string) {
+        console.log('update visibility tree', group, visibilityMode, treeID)
+
+        if (!this._trees.has(treeID)) return;
+        const tree = this._trees.get(treeID);
+        console.log('update visibility tree', tree)
         if (!group && this._selectedGroup) group = this._selectedGroup;
-        if (!visibilityMode && this._visibilityMode) visibilityMode = this._visibilityMode;
-        if (!group || !visibilityMode || !this._trees.has(treeID)) return;
+
+
+        if (!tree || !group) return;
+        const node = tree.tree.getNode(group.id);
+        if (!node) return;
+
+        if (!visibilityMode && this._visibilityMode)
+            visibilityMode = this._visibilityMode;
         console.log('update visibility', visibilityMode, group.id)
 
-        const tree = this._trees.get(treeID);
-        if (!tree) return;
 
-        const node = tree.tree.getNode(group.id);
         // get all nodes of the same type as they will be the equal level in the tree 
         const sameNodeTypes = tree.tree.getNodes(n => n.type === node?.type)
         if (!node || !sameNodeTypes) return;
 
-        // make parent visible // note: should be recursive in future
-        if (node?.parent)
-            this.setVisibility(node.parent.id, tree.tree.id, VisibilityState.Visible, false)
-
+        // make parent visible 
+        this.makeParentsVisible(node, tree.tree);
         // get visible and hidden nodes to later do the same for the children
 
         switch (visibilityMode) {
@@ -410,6 +441,16 @@ export class ModelViewManager extends OBC.Component {
         this.onGroupVisibilitySet.trigger({ treeID: tree.tree.id, visibilityMap: tree.visibilityMap });
         this.onVisibilityMapUpdated
         this.updateVisibility(tree.id);
+    }
+
+    makeParentsVisible(node: TreeNode<IfcElement>, tree: Tree<IfcElement>) {
+        if (node.parent) {
+            // Set the visibility of the current parent node
+            this.setVisibility(node.parent.id, tree.id, VisibilityState.Visible, false);
+
+            // Recursive call to make the parent of the current parent visible
+            this.makeParentsVisible(node.parent, tree);
+        }
     }
 
     /**
@@ -518,10 +559,11 @@ export class ModelViewManager extends OBC.Component {
             return;
         }
         if (visibilityMap.get(nodeId) === state) {
-            //console.log("failed to change visibility, state already the same:", this._treeVisibility.get(nodeId))
+            console.log("failed to change visibility, state already the same:", visibilityMap.get(nodeId))
             return;
         }
         visibilityMap.set(nodeId, state);
+        console.log('vis mode setting', nodeId, state, visibilityMap)
 
         if (updateVisibility) this.updateVisibility(treeID);
     }
